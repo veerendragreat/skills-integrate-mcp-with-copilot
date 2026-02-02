@@ -11,6 +11,9 @@ from fastapi.responses import RedirectResponse
 import os
 from pathlib import Path
 
+import csv
+from typing import List
+
 app = FastAPI(title="Mergington High School API",
               description="API for viewing and signing up for extracurricular activities")
 
@@ -83,6 +86,48 @@ def root():
     return RedirectResponse(url="/static/index.html")
 
 
+# Persistence setup
+DATA_FILE = current_dir / "results.txt"
+
+
+def load_persistence():
+    """Load participants from DATA_FILE (CSV: activity,email)"""
+    if not DATA_FILE.exists():
+        return
+    try:
+        with DATA_FILE.open("r", newline="") as f:
+            reader = csv.reader(f)
+            for row in reader:
+                if len(row) < 2:
+                    continue
+                activity_name, email = row[0], row[1]
+                if activity_name in activities:
+                    # avoid duplicates
+                    if email not in activities[activity_name]["participants"]:
+                        activities[activity_name]["participants"].append(email)
+    except Exception as e:
+        # If loading fails, log to console but continue with in-memory data
+        print(f"Failed to load persistence from {DATA_FILE}: {e}")
+
+
+def save_persistence():
+    """Save participants to DATA_FILE as CSV rows: activity,email"""
+    try:
+        with DATA_FILE.open("w", newline="") as f:
+            writer = csv.writer(f)
+            for name, info in activities.items():
+                participants: List[str] = info.get("participants", [])
+                for email in participants:
+                    writer.writerow([name, email])
+    except Exception as e:
+        # bubble up as runtime error so endpoints can report failure
+        raise RuntimeError(f"Failed to save persistence: {e}")
+
+
+# Load persistence at startup
+load_persistence()
+
+
 @app.get("/activities")
 def get_activities():
     return activities
@@ -107,6 +152,13 @@ def signup_for_activity(activity_name: str, email: str):
 
     # Add student
     activity["participants"].append(email)
+    try:
+        save_persistence()
+    except RuntimeError as e:
+        # If saving fails, remove the added participant to keep consistency
+        activity["participants"].remove(email)
+        raise HTTPException(status_code=500, detail=str(e))
+
     return {"message": f"Signed up {email} for {activity_name}"}
 
 
@@ -129,4 +181,11 @@ def unregister_from_activity(activity_name: str, email: str):
 
     # Remove student
     activity["participants"].remove(email)
+    try:
+        save_persistence()
+    except RuntimeError as e:
+        # If saving fails, re-add the participant to keep consistency
+        activity["participants"].append(email)
+        raise HTTPException(status_code=500, detail=str(e))
+
     return {"message": f"Unregistered {email} from {activity_name}"}
